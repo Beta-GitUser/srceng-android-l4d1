@@ -178,7 +178,9 @@ try_download() {
 		-w '%{http_code}' \
 		"https://api.github.com/repos/${ENGINE_REPO}/actions/artifacts/${ART}/zip" \
 		2>"${STAGE}/curl.err")" || code="curl-exit-${?}"
-	info "  ${label}: HTTP ${code}, $(wc -c <"${STAGE}/libs.zip" | tr -d ' ') bytes"
+	# stderr, not stdout: this function's return value is captured by the
+	# caller, and echoing here would end up inside the status string.
+	info "  ${label}: HTTP ${code}, $(wc -c <"${STAGE}/libs.zip" | tr -d ' ') bytes" >&2
 	printf '%s' "$code"
 }
 
