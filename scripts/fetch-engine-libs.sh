@@ -33,6 +33,14 @@ ARTIFACT_NAME="${ARTIFACT_NAME:-android-aarch64-libraries}"
 RUN_ID="${ENGINE_RUN_ID:-}"
 ABI_DIR="${ABI_DIR:-libs/arm64-v8a}"
 
+# Prebuilts the modules link against that the engine's artifact does not
+# carry. This is the repository the engine mounts at lib/ and that its
+# wscript installs SDL2 from, so these are the very binaries the modules were
+# linked against rather than a rebuild that could drift.
+EXTRA_LIBS_REPO="${EXTRA_LIBS_REPO:-nillerusr/source-engine-libs}"
+EXTRA_LIBS_PATH="${EXTRA_LIBS_PATH:-android/aarch64}"
+EXTRA_LIBS_REF="${EXTRA_LIBS_REF:-master}"
+
 EXPECT_CLASS="ELF64"
 EXPECT_MACHINE="183"   # EM_AARCH64
 
@@ -297,6 +305,94 @@ for m in "${MODULES[@]}"; do
 done
 
 info "Staged ${staged} libraries into ${ABI_DIR} (${#REQUIRED_MODULES[@]} of them are required modules)"
+
+# --- resolve what the modules link against --------------------------------
+# The engine's libraries are not self-contained. They link libSDL2.so, which
+# the engine's build finds in its own lib/ submodule -- nillerusr/source-engine-libs,
+# the repo wscript:648 installs prebuilts from -- but which never reaches the
+# artifact, because the engine's Collect libraries step only gathers the four
+# named modules.
+#
+# A module whose dependency is absent is a dlopen failure on the phone, not a
+# missing-module message, and there is no adb to read it from. So walk the
+# modules' DT_NEEDED and fetch whatever is neither shipped nor a platform
+# library from that submodule -- the same prebuilt the engine linked against,
+# not a rebuild that might drift.
+
+read_needed() {
+	local so="$1"
+	if command -v readelf >/dev/null 2>&1; then
+		readelf -d "$so" 2>/dev/null
+	elif command -v objdump >/dev/null 2>&1; then
+		objdump -p "$so" 2>/dev/null
+	else
+		return 0
+	fi | sed -n 's/.*NEEDED.*\[\([^]]*\)\].*/\1/p'
+}
+
+fetch_prebuilt() {
+	local name="$1" out="$2" code
+	code="$(curl -sS -L -H "Accept: application/vnd.github.raw" \
+		--retry 3 --retry-delay 3 --retry-all-errors --connect-timeout 30 \
+		-o "$out" -w '%{http_code}' \
+		"https://api.github.com/repos/${EXTRA_LIBS_REPO}/contents/${EXTRA_LIBS_PATH}/${name}?ref=${EXTRA_LIBS_REF}" \
+		2>/dev/null)" || return 1
+	[ "$code" = "200" ] || return 1
+	[ -s "$out" ] || return 1
+}
+
+resolved=0
+if ! command -v readelf >/dev/null 2>&1 && ! command -v objdump >/dev/null 2>&1; then
+	warn "no readelf or objdump here, so module dependencies cannot be checked"
+else
+	# Bounded passes: a library fetched on one pass may itself need another.
+	for pass in 1 2 3; do
+		wanted=()
+		while IFS= read -r so; do
+			[ -f "$so" ] || continue
+			while IFS= read -r n; do
+				[ -z "$n" ] && continue
+				[ -f "${ABI_DIR}/${n}" ] && continue
+				case "$PLATFORM_LIBS" in
+					*" ${n} "*) continue ;;
+				esac
+				wanted+=("$n")
+			done < <(read_needed "$so")
+		done < <(find "$ABI_DIR" -type f -name '*.so' 2>/dev/null | sort)
+
+		# Unique, preserving nothing in particular.
+		uniq_wanted=()
+		while IFS= read -r n; do
+			[ -z "$n" ] && continue
+			uniq_wanted+=("$n")
+		done < <(printf '%s\n' "${wanted[@]:-}" | sort -u)
+
+		[ "${#uniq_wanted[@]}" -eq 0 ] && break
+
+		progress=0
+		for n in "${uniq_wanted[@]}"; do
+			out="${STAGE}/extra-${n}"
+			if ! fetch_prebuilt "$n" "$out"; then
+				info "  ${n}: not in ${EXTRA_LIBS_REPO}/${EXTRA_LIBS_PATH}"
+				continue
+			fi
+			read -r class machine <<<"$(elf_info "$out")"
+			if [ "$class" != "$EXPECT_CLASS" ] || [ "$machine" != "$EXPECT_MACHINE" ]; then
+				warn "  ${n} from ${EXTRA_LIBS_REPO} is ${class}/${machine}, not ${EXPECT_CLASS}/${EXPECT_MACHINE}; leaving it out"
+				rm -f "$out"
+				continue
+			fi
+			cp "$out" "${ABI_DIR}/${n}" || exit 1
+			info "  ${n}: fetched from ${EXTRA_LIBS_REPO} ($(wc -c <"${ABI_DIR}/${n}" | tr -d ' ') bytes)"
+			resolved=$((resolved + 1))
+			progress=1
+		done
+
+		[ "$progress" = "0" ] && break
+	done
+fi
+
+info "Resolved ${resolved} extra libraries from ${EXTRA_LIBS_REPO}"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 	{
