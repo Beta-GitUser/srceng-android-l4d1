@@ -240,6 +240,19 @@ unzip -q -o "${STAGE}/libs.zip" -d "${STAGE}/out" || {
 	exit 0
 }
 
+# What the artifact actually carries. The engine's own libraries are not all
+# obvious: libclient.so and libGameUI.so link against libtier0.so,
+# libvstdlib.so and libsteam_api.so, none of which are modules the loader
+# looks up by name, so they are easy to leave behind -- and a module missing
+# its own dependency is a dlopen failure, not a missing-module message.
+ARTIFACT_SOS="$(find "${STAGE}/out" -type f -name '*.so' 2>/dev/null | sort)"
+info "artifact contains:"
+printf '%s\n' "$ARTIFACT_SOS" | while IFS= read -r f; do
+	[ -z "$f" ] && continue
+	info "  $(basename "$f") ($(wc -c <"$f" | tr -d ' ') bytes)"
+done
+notice "artifact libraries: $(printf '%s\n' "$ARTIFACT_SOS" | xargs -r -n1 basename | sort | tr '\n' ' ')"
+
 # --- stage and verify ------------------------------------------------------
 mkdir -p "$ABI_DIR"
 staged=0
@@ -247,18 +260,29 @@ missing=0
 bad=0
 optional_missing=0
 
+# Ship every AArch64 shared object the artifact carries, not only the modules
+# the loader looks up by name. The four named ones are still checked
+# individually below; anything else is cargo they depend on.
+while IFS= read -r src; do
+	[ -z "$src" ] && continue
+	name="$(basename "$src")"
+	read -r class machine <<<"$(elf_info "$src")"
+	if [ "$class" != "$EXPECT_CLASS" ] || [ "$machine" != "$EXPECT_MACHINE" ]; then
+		warn "dropping ${name}: ${class}/${machine}, not ${EXPECT_CLASS}/${EXPECT_MACHINE} (AArch64)"
+		continue
+	fi
+	cp "$src" "${ABI_DIR}/${name}" || exit 1
+	staged=$((staged + 1))
+done <<<"$ARTIFACT_SOS"
+
 for m in "${MODULES[@]}"; do
 	required=0
 	for r in "${REQUIRED_MODULES[@]}"; do
 		[ "$r" = "$m" ] && required=1
 	done
 
-	src="$(find "${STAGE}/out" -type f -name "$m" -print -quit 2>/dev/null)"
-	# Case-insensitive fallback: only libGameUI.so should ever need it, and only
-	# if the engine renames the target. The staged name stays canonical.
-	[ -z "$src" ] && src="$(find "${STAGE}/out" -type f -iname "$m" -print -quit 2>/dev/null)"
-
-	if [ -z "$src" ]; then
+	# Already copied by the loop above; this pass only reports.
+	if [ ! -f "${ABI_DIR}/${m}" ]; then
 		if [ "$required" = "1" ]; then
 			fail "engine artifact is missing ${m}"
 			missing=$((missing + 1))
@@ -269,27 +293,10 @@ for m in "${MODULES[@]}"; do
 		continue
 	fi
 
-	read -r class machine <<<"$(elf_info "$src")"
-	if [ "$class" != "$EXPECT_CLASS" ] || [ "$machine" != "$EXPECT_MACHINE" ]; then
-		if [ "$required" = "1" ]; then
-			fail "${m} is ${class}/${machine}, expected ${EXPECT_CLASS}/${EXPECT_MACHINE} (AArch64) - the cross-compile went wrong"
-			bad=$((bad + 1))
-		else
-			warn "${m} is ${class}/${machine}, not ${EXPECT_CLASS}/${EXPECT_MACHINE} - dropping it rather than shipping a module the loader will reject"
-			optional_missing=$((optional_missing + 1))
-		fi
-		continue
-	fi
-
-	cp "$src" "${ABI_DIR}/${m}" || exit 1
 	info "staged ${m} ($(wc -c <"${ABI_DIR}/${m}" | tr -d ' ') bytes)"
-	staged=$((staged + 1))
 done
 
-# Anything else the artifact carried is dropped on purpose: the carrier ships
-# the four modules the loader looks for, nothing more.
-
-info "Staged ${staged}/${#MODULES[@]} modules into ${ABI_DIR}"
+info "Staged ${staged} libraries into ${ABI_DIR} (${#REQUIRED_MODULES[@]} of them are required modules)"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 	{

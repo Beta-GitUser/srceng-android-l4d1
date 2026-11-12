@@ -34,6 +34,11 @@ libhwui.so libskia.so libft2.so libharfbuzz_ng.so libpng.so
 libcrypto.so libssl.so libcompiler_rt.so libm_hard.so
 "
 
+# Collapse the list to single-spaced tokens. The whole thing is matched with
+# " name ", so a name sitting at the end of a line -- followed by a newline
+# rather than a space -- would not match and would be reported as missing.
+SYSTEM_LIBS=" $(printf '%s' "$SYSTEM_LIBS" | tr '\n\t' '  ') "
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
