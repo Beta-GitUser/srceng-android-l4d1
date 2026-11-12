@@ -36,7 +36,18 @@ ABI_DIR="${ABI_DIR:-libs/arm64-v8a}"
 EXPECT_CLASS="ELF64"
 EXPECT_MACHINE="183"   # EM_AARCH64
 
-MODULES=(libclient.so libserver.so liblauncher.so libGameUI.so)
+# libclient/server/launcher are the engine and the game modules: without them
+# nothing runs at all, so they are required.
+#
+# libGameUI.so is the VGUI main menu. It is a separate waf target
+# (gameui/wscript, target 'GameUI'), the engine's own "Collect libraries" step
+# reports it as absent on the L4D1 branch, and the Android entry point is
+# launcher/android/main.cpp -- which may go straight to a map and never load
+# the menu. Whether it is needed is an engine-side question, so the carrier
+# stages it when it exists and only warns when it does not.
+REQUIRED_MODULES=(libclient.so libserver.so liblauncher.so)
+OPTIONAL_MODULES=(libGameUI.so)
+MODULES=("${REQUIRED_MODULES[@]}" "${OPTIONAL_MODULES[@]}")
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -217,23 +228,39 @@ mkdir -p "$ABI_DIR"
 staged=0
 missing=0
 bad=0
+optional_missing=0
 
 for m in "${MODULES[@]}"; do
+	required=0
+	for r in "${REQUIRED_MODULES[@]}"; do
+		[ "$r" = "$m" ] && required=1
+	done
+
 	src="$(find "${STAGE}/out" -type f -name "$m" -print -quit 2>/dev/null)"
 	# Case-insensitive fallback: only libGameUI.so should ever need it, and only
 	# if the engine renames the target. The staged name stays canonical.
 	[ -z "$src" ] && src="$(find "${STAGE}/out" -type f -iname "$m" -print -quit 2>/dev/null)"
 
 	if [ -z "$src" ]; then
-		fail "engine artifact is missing ${m}"
-		missing=$((missing + 1))
+		if [ "$required" = "1" ]; then
+			fail "engine artifact is missing ${m}"
+			missing=$((missing + 1))
+		else
+			warn "engine artifact has no ${m} (optional - the Android launcher may not need the VGUI menu)"
+			optional_missing=$((optional_missing + 1))
+		fi
 		continue
 	fi
 
 	read -r class machine <<<"$(elf_info "$src")"
 	if [ "$class" != "$EXPECT_CLASS" ] || [ "$machine" != "$EXPECT_MACHINE" ]; then
-		fail "${m} is ${class}/${machine}, expected ${EXPECT_CLASS}/${EXPECT_MACHINE} (AArch64) - the cross-compile went wrong"
-		bad=$((bad + 1))
+		if [ "$required" = "1" ]; then
+			fail "${m} is ${class}/${machine}, expected ${EXPECT_CLASS}/${EXPECT_MACHINE} (AArch64) - the cross-compile went wrong"
+			bad=$((bad + 1))
+		else
+			warn "${m} is ${class}/${machine}, not ${EXPECT_CLASS}/${EXPECT_MACHINE} - dropping it rather than shipping a module the loader will reject"
+			optional_missing=$((optional_missing + 1))
+		fi
 		continue
 	fi
 

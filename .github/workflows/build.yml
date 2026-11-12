@@ -83,16 +83,23 @@ jobs:
         echo "--- native libraries in the APK ---"
         unzip -l "$APK" | grep -a 'lib/' || echo "(none)"
         found=0
-        for m in libclient.so libserver.so liblauncher.so libGameUI.so; do
+        for m in libclient.so libserver.so liblauncher.so; do
           if unzip -l "$APK" | grep -aq "lib/arm64-v8a/${m}"; then
             echo "ok      lib/arm64-v8a/${m}"
             found=$((found + 1))
           else
-            echo "::warning::${m} is not in lib/arm64-v8a/ - the engine will not find it"
+            echo "::error::${m} is not in lib/arm64-v8a/ - the engine will not find it"
           fi
         done
+        # libGameUI.so is the VGUI menu, a separate waf target the engine does
+        # not currently build. Notice, not warning: it may never be needed.
+        if unzip -l "$APK" | grep -aq "lib/arm64-v8a/libGameUI.so"; then
+          echo "ok      lib/arm64-v8a/libGameUI.so (optional)"
+        else
+          echo "::notice::libGameUI.so absent - optional, the Android launcher may not need the VGUI menu"
+        fi
         echo "modules_present=${found}" >>"$GITHUB_OUTPUT"
-        echo "modules present: ${found}/4"
+        echo "required modules present: ${found}/3"
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
