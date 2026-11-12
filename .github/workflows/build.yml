@@ -113,10 +113,6 @@ jobs:
     - name: Check module dependencies
       run: scripts/check-module-deps.sh bin/srceng-debug.apk
 
-    # Where does libSDL2.so come from? Investigation, not plumbing.
-    - name: Inspect the engine APK
-      run: scripts/inspect-engine-apk.sh
-
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
