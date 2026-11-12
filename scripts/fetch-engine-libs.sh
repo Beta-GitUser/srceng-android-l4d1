@@ -53,6 +53,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 warn() { echo "::warning::$*"; }
+notice() { echo "::notice::$*"; }
 info() { echo "$*"; }
 fail() { echo "::error::$*"; }
 
@@ -196,14 +197,17 @@ try_download() {
 }
 
 dl_code=""
+dl_label=""
 for var in ENGINE_ARTIFACT_TOKEN GH_TOKEN API_GITHUB_TOKEN GITHUB_TOKEN; do
 	eval "tok=\${${var}:-}"
 	[ -n "$tok" ] || continue
 	dl_code="$(try_download "$var" "$tok")"
+	dl_label="$var"
 	[ "$dl_code" = "200" ] && break
 done
 if [ "$dl_code" != "200" ]; then
 	dl_code="$(try_download anonymous "")"
+	dl_label="anonymous"
 fi
 
 if [ "$dl_code" != "200" ]; then
@@ -217,6 +221,15 @@ if [ "$dl_code" != "200" ]; then
 fi
 
 info "downloaded $(wc -c <"${STAGE}/libs.zip" | tr -d ' ') bytes"
+
+# Worth recording on every run: an anonymous download works only while the
+# shared Actions egress IP is under api.github.com's 60-requests-an-hour
+# anonymous budget, so a green build can silently mean "no libraries".
+if [ "$dl_label" = "anonymous" ]; then
+	warn "fetched anonymously - reliable only while the shared runner IP is under the anonymous rate limit. Set ENGINE_ARTIFACT_TOKEN to make this deterministic."
+else
+	notice "fetched using ${dl_label}"
+fi
 
 unzip -q -o "${STAGE}/libs.zip" -d "${STAGE}/out" || {
 	warn "artifact is not a readable zip; building the APK without engine libraries"
