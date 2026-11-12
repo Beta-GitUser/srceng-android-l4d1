@@ -109,15 +109,23 @@ fi
 if [ ! -d "$SDK/platforms/${WANT_PLATFORM}" ]; then
 	warn "platform ${WANT_PLATFORM} is not installed - ant will fail unless project.properties targets an installed platform"
 fi
-if [ ! -d "$SDK/build-tools/${WANT_BUILD_TOOLS}" ]; then
-	local_bt="$(ls -1 "$SDK/build-tools" 2>/dev/null | sort -V | tail -1)"
-	if [ -n "$local_bt" ]; then
-		warn "build-tools ${WANT_BUILD_TOOLS} is not installed; the newest available is ${local_bt}"
-		WANT_BUILD_TOOLS="$local_bt"
-	else
-		die "no build-tools installed - dx is required"
-	fi
-fi
+# The ant rules invoke ${build.tools.dir}/lib/dx.jar, and dx shipped only up to
+# build-tools 30.0.3 (d8 replaced it after that). So "newest" is wrong here:
+# pick the newest installed version that still has dx, capped at 30.x.
+BT=""
+for cand in $(ls -1 "$SDK/build-tools" 2>/dev/null | sort -V -r); do
+	[ -f "$SDK/build-tools/${cand}/lib/dx.jar" ] || continue
+	case "$cand" in
+		[4-9]*) continue ;;
+		3[1-9]*) continue ;;
+	esac
+	BT="$cand"
+	break
+done
 
-echo "ANDROID_BUILD_TOOLS=${WANT_BUILD_TOOLS}" >>"${GITHUB_ENV:-/dev/null}"
+if [ -z "$BT" ]; then
+	die "no build-tools with dx.jar is installed - the ant rules need dx, not d8"
+fi
+info "build-tools selected: ${BT} (has dx.jar)"
+echo "ANDROID_BUILD_TOOLS=${BT}" >>"${GITHUB_ENV:-/dev/null}"
 export_env

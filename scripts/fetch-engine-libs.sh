@@ -94,8 +94,25 @@ fi
 info "Using engine run ${RUN_ID}"
 
 # --- resolve the artifact --------------------------------------------------
-ART="$(api_json "repos/${ENGINE_REPO}/actions/runs/${RUN_ID}/artifacts" 2>/dev/null \
-	| ARTIFACT_NAME="$ARTIFACT_NAME" python3 -c 'import json,os,sys
+ARTIFACTS_JSON="$(api_json "repos/${ENGINE_REPO}/actions/runs/${RUN_ID}/artifacts" 2>/dev/null || true)"
+
+# Print the whole inventory while this is still being brought up: a renamed or
+# expired artifact is otherwise an invisible difference between two runs.
+info "artifacts on run ${RUN_ID}:"
+printf '%s' "$ARTIFACTS_JSON" | python3 -c 'import json,sys
+try:
+    arts = json.load(sys.stdin).get("artifacts") or []
+except Exception:
+    arts = []
+if not arts:
+    print("  (none listed)")
+for a in arts:
+    print("  %-32s id=%-14s %10d bytes%s"
+          % (a.get("name"), a.get("id"), a.get("size_in_bytes") or 0,
+             "  EXPIRED" if a.get("expired") else ""))
+' 2>/dev/null || echo "  (could not parse the artifact list)"
+
+ART="$(printf '%s' "$ARTIFACTS_JSON" | ARTIFACT_NAME="$ARTIFACT_NAME" python3 -c 'import json,os,sys
 name = os.environ["ARTIFACT_NAME"]
 try:
     arts = json.load(sys.stdin).get("artifacts") or []
@@ -113,14 +130,27 @@ if [ -z "$ART" ]; then
 fi
 
 # --- download --------------------------------------------------------------
-# Deliberately anonymous: the -fsSL chain follows GitHub's redirect to its
+# Deliberately anonymous: the -L chain follows GitHub's redirect to its
 # artifact storage, and sending our token along would leak it to that host.
+# No -f, so a non-200 body is saved and can be shown instead of thrown away.
 info "Downloading ${ARTIFACT_NAME} (artifact ${ART})"
-if ! curl -fsSL -o "${STAGE}/libs.zip" \
-	"https://api.github.com/repos/${ENGINE_REPO}/actions/artifacts/${ART}/zip"; then
-	warn "artifact download failed; building the APK without engine libraries"
+dl_code="$(curl -sS -L \
+	-H "Accept: application/vnd.github+json" \
+	-o "${STAGE}/libs.zip" \
+	-w '%{http_code}' \
+	"https://api.github.com/repos/${ENGINE_REPO}/actions/artifacts/${ART}/zip" \
+	2>"${STAGE}/curl.err")" || dl_code="curl-exit-${?}"
+
+if [ "$dl_code" != "200" ]; then
+	warn "artifact download failed (status ${dl_code}); building the APK without engine libraries"
+	[ -s "${STAGE}/curl.err" ] && head -n 5 "${STAGE}/curl.err" && echo
+	if [ -s "${STAGE}/libs.zip" ] && [ "$(wc -c <"${STAGE}/libs.zip")" -lt 4096 ]; then
+		warn "response body: $(tr -d '\r\n' <"${STAGE}/libs.zip" | head -c 400)"
+	fi
 	exit 0
 fi
+
+info "downloaded $(wc -c <"${STAGE}/libs.zip" | tr -d ' ') bytes"
 
 unzip -q -o "${STAGE}/libs.zip" -d "${STAGE}/out" || {
 	warn "artifact is not a readable zip; building the APK without engine libraries"
