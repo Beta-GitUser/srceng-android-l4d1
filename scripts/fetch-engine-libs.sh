@@ -185,7 +185,11 @@ try_download() {
 	local -a hdr=(-H "Accept: application/vnd.github+json")
 	[ -n "$token" ] && hdr+=(-H "Authorization: Bearer ${token}")
 	local code
+	# Retries: this endpoint intermittently answers 401 from runner IPs even
+	# with a valid token, and the failure mode -- an APK with no libraries that
+	# still builds green -- is worse than waiting a few seconds.
 	code="$(curl -sS -L "${hdr[@]}" \
+		--retry 4 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
 		-o "${STAGE}/libs.zip" \
 		-w '%{http_code}' \
 		"https://api.github.com/repos/${ENGINE_REPO}/actions/artifacts/${ART}/zip" \

@@ -91,6 +91,13 @@ jobs:
             echo "::error::${m} is not in lib/arm64-v8a/ - the engine will not find it"
           fi
         done
+        # An APK without the engine is not a carrier, and a green run that
+        # quietly ships one is worse than a red run. Only the explicit
+        # smoke-test mode is allowed to produce a libless APK.
+        if [ "${SKIP_LIBRARIES:-0}" != "1" ] && [ "$found" -ne 3 ]; then
+          echo "::error::only ${found}/3 required engine modules are in the APK"
+          exit 1
+        fi
         # libGameUI.so is the VGUI menu, a separate waf target the engine does
         # not currently build. Notice, not warning: it may never be needed.
         if unzip -l "$APK" | grep -aq "lib/arm64-v8a/libGameUI.so"; then
