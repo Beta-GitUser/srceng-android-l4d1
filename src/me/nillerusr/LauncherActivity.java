@@ -17,6 +17,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.os.Handler;
 import android.app.Dialog;
+import android.content.Context;
 import android.content.DialogInterface;
 import java.lang.Thread;
 import android.content.Intent;
@@ -40,7 +41,15 @@ import me.nillerusr.DirchActivity;
 import org.libsdl.app.SDLActivity;
 
 public class LauncherActivity extends Activity {
+	// This fork is L4D1 only. ValveActivity2 defaults to "hl2" when the launch
+	// intent carries no gamedir, which would mount the wrong mod directory.
+	public static final String DEFAULT_GAMEDIR = "left4dead";
+
 	public static String PKG_NAME;
+
+	public static String getGameDir(Context ctx) {
+		return ctx.getSharedPreferences("mod", 0).getString("gamedir", DEFAULT_GAMEDIR);
+	}
 
 	public static boolean can_write = true;
 	static EditText cmdArgs, GamePath = null, EnvEdit, res_width, res_height;
@@ -144,6 +153,11 @@ public class LauncherActivity extends Activity {
 			super.setTheme(0x01030005);
 
 		mPref = getSharedPreferences("mod", 0);
+
+		// As early as possible: everything logged from here on -- the launcher's
+		// own diagnostics, SDL's, and the engine's "SRCENG" tag -- lands in
+		// <gamepath>/<gamedir>/session.log.
+		SessionLog.start(this);
 
 		setContentView(R.layout.activity_launcher);
 
@@ -262,6 +276,8 @@ public class LauncherActivity extends Activity {
 
 		Intent intent = new Intent(LauncherActivity.this, SDLActivity.class);
 		intent.addFlags(268435456);
+		intent.putExtra("gamedir", getGameDir(this));
+		intent.putExtra("argv", cmdArgs.getText().toString());
 		startActivity(intent);
 
 
