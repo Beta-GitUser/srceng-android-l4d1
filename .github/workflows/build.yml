@@ -108,6 +108,11 @@ jobs:
         echo "modules_present=${found}" >>"$GITHUB_OUTPUT"
         echo "required modules present: ${found}/3"
 
+    # A module that needs a library nobody shipped is a black screen on the
+    # phone and a one-line warning here. Check it before the user installs.
+    - name: Check module dependencies
+      run: scripts/check-module-deps.sh bin/srceng-debug.apk
+
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
