@@ -45,13 +45,30 @@ warn() { echo "::warning::$*"; }
 info() { echo "$*"; }
 fail() { echo "::error::$*"; }
 
-# Quiet variant of curl for API calls. -f makes HTTP errors visible to the caller
-# instead of silently writing an error document to stdout.
+# The best token available, in the order that matters. Actions scopes
+# GITHUB_TOKEN to this repository, so it is last: it keeps the API calls
+# working against api.github.com's anonymous rate limit even when no token
+# that can reach the engine repository is configured.
+best_token() {
+	local var tok
+	for var in ENGINE_ARTIFACT_TOKEN GH_TOKEN API_GITHUB_TOKEN GITHUB_TOKEN; do
+		eval "tok=\${${var}:-}"
+		if [ -n "$tok" ]; then
+			printf '%s' "$tok"
+			return 0
+		fi
+	done
+	return 0
+}
+
+# Quiet variant of curl for API calls. -f makes HTTP errors visible to the
+# caller instead of silently writing an error document to stdout.
 api_json() {
 	local path="$1"; shift
+	local tok; tok="$(best_token)"
 	local -a hdr=(-fsSL -H "Accept: application/vnd.github+json")
-	if [ -n "${GITHUB_TOKEN:-}" ]; then
-		hdr+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+	if [ -n "$tok" ]; then
+		hdr+=(-H "Authorization: Bearer ${tok}")
 	fi
 	curl "${hdr[@]}" "$@" "https://api.github.com/${path}"
 }
@@ -130,23 +147,59 @@ if [ -z "$ART" ]; then
 fi
 
 # --- download --------------------------------------------------------------
-# Deliberately anonymous: the -L chain follows GitHub's redirect to its
-# artifact storage, and sending our token along would leak it to that host.
+# Downloading an artifact requires authentication. Being a public repository
+# is not enough: the endpoint answers an anonymous request with a redirect
+# from a normal network, but from a GitHub Actions runner it answers 401
+# "Requires authentication", because that IP range is shared and the anonymous
+# budget for api.github.com is 60 requests an hour. So one of these tokens has
+# to be able to read the engine repository:
+#
+#   ENGINE_ARTIFACT_TOKEN   the intended one: a token with read access to the
+#                           engine repository and nothing else
+#   GH_TOKEN / API_GITHUB_TOKEN  whatever this repository already had
+#   GITHUB_TOKEN            deliberately tried last. Actions scopes it to THIS
+#                           repository, so it cannot read the engine's
+#                           artifacts -- but the status it returns tells us
+#                           whether the problem is credentials or something
+#                           else, so it is worth the attempt.
+#
 # No -f, so a non-200 body is saved and can be shown instead of thrown away.
+# curl also strips the Authorization header when a redirect crosses to another
+# host, so the token never reaches GitHub's artifact storage.
 info "Downloading ${ARTIFACT_NAME} (artifact ${ART})"
-dl_code="$(curl -sS -L \
-	-H "Accept: application/vnd.github+json" \
-	-o "${STAGE}/libs.zip" \
-	-w '%{http_code}' \
-	"https://api.github.com/repos/${ENGINE_REPO}/actions/artifacts/${ART}/zip" \
-	2>"${STAGE}/curl.err")" || dl_code="curl-exit-${?}"
+
+try_download() {
+	local label="$1" token="$2"
+	local -a hdr=(-H "Accept: application/vnd.github+json")
+	[ -n "$token" ] && hdr+=(-H "Authorization: Bearer ${token}")
+	local code
+	code="$(curl -sS -L "${hdr[@]}" \
+		-o "${STAGE}/libs.zip" \
+		-w '%{http_code}' \
+		"https://api.github.com/repos/${ENGINE_REPO}/actions/artifacts/${ART}/zip" \
+		2>"${STAGE}/curl.err")" || code="curl-exit-${?}"
+	info "  ${label}: HTTP ${code}, $(wc -c <"${STAGE}/libs.zip" | tr -d ' ') bytes"
+	printf '%s' "$code"
+}
+
+dl_code=""
+for var in ENGINE_ARTIFACT_TOKEN GH_TOKEN API_GITHUB_TOKEN GITHUB_TOKEN; do
+	eval "tok=\${${var}:-}"
+	[ -n "$tok" ] || continue
+	dl_code="$(try_download "$var" "$tok")"
+	[ "$dl_code" = "200" ] && break
+done
+if [ "$dl_code" != "200" ]; then
+	dl_code="$(try_download anonymous "")"
+fi
 
 if [ "$dl_code" != "200" ]; then
-	warn "artifact download failed (status ${dl_code}); building the APK without engine libraries"
+	warn "artifact download failed (last status ${dl_code}); building the APK without engine libraries"
 	[ -s "${STAGE}/curl.err" ] && head -n 5 "${STAGE}/curl.err" && echo
 	if [ -s "${STAGE}/libs.zip" ] && [ "$(wc -c <"${STAGE}/libs.zip")" -lt 4096 ]; then
 		warn "response body: $(tr -d '\r\n' <"${STAGE}/libs.zip" | head -c 400)"
 	fi
+	warn "set ENGINE_ARTIFACT_TOKEN (a token that can read ${ENGINE_REPO}) to include the engine libraries"
 	exit 0
 fi
 
