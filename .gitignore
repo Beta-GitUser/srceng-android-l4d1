@@ -1,3 +1,18 @@
 gen/
 bin/
 *.o
+
+# Filled by scripts/fetch-engine-libs.sh -- the engine's aarch64 modules, ~110 MB
+# of debug-symbol-carrying ELF. Never commit these.
+libs/
+
+# Produced by scripts/workflow.sh
+version
+build.log
+
+# SDK / NDK working copies fetched during a build
+android-sdk/
+ndk-binaries/
+srcsdk/
+out/
+local.properties

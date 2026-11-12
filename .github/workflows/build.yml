@@ -1,36 +1,112 @@
 name: Build android package
 
+# The carrier builds here because the user has no build machine. This produces
+# the APK; the aarch64 engine libraries inside it are downloaded from the
+# engine repository's "Android build" workflow by scripts/fetch-engine-libs.sh.
+
 on:
   push:
-    branches: [ con-wrappers ]
+    branches: ["arena/**", android-fixes]
   pull_request:
-    branches: [ con-wrappers ]
+    branches: ["arena/**", android-fixes]
+  workflow_dispatch:
+    inputs:
+      engine_run_id:
+        description: "Engine 'Android build' run to pull libraries from (blank = latest green)"
+        type: string
+        required: false
+      skip_libraries:
+        description: "Build without engine libraries (smoke-test the Java build only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: carrier-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    env:
+      ENGINE_RUN_ID: ${{ inputs.engine_run_id }}
+      SKIP_LIBRARIES: ${{ inputs.skip_libraries && '1' || '0' }}
+      DEPLOY_BRANCH: srceng-l4d1
+      # Not used to reach the engine repository -- that one is public and the
+      # artifact download is anonymous. This only lifts the api.github.com rate
+      # limit from 60/h to 5000/h.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+
+    - name: Host toolchain
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          openjdk-8-jdk ant unzip zip python3
+        echo "JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64" >>"$GITHUB_ENV"
+
+    - name: Android SDK
+      run: ANDROID_HOME="$HOME/android-sdk" scripts/setup-android-sdk.sh
+
     - name: Build
       run: |
-        sudo apt-get update
-        sudo apt install -y make openjdk-8-jdk openjdk-8-jre ant-contrib python3-requests python3-pip
-        sudo pip3 install websocket-client
-        git clone --depth 1 https://gitlab.com/LostGamer/ndk-binaries
-        git clone --depth 1 https://gitlab.com/LostGamer/android-sdk
-        git clone --depth 1 https://github.com/nillerusr/srcsdk
-        cd srcsdk
-        git submodule init && git submodule update
-        cd ../
-        DEPLOY_BRANCH=srceng-old-port COMMIT=$(git rev-parse HEAD) scripts/workflow.sh
+        set -euo pipefail
+        java -version 2>&1 | head -2
+        ant -version
+        COMMIT="$(git rev-parse HEAD)" scripts/workflow.sh 2>&1 | tee build.log
 
-    - name: Upload files
-      shell: bash
-      env:
-        DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
-        GH_TOKEN: ${{ secrets.API_GITHUB_TOKEN }}
+    # The APK is only a carrier if the modules are actually inside it, under the
+    # ABI directory that becomes APP_LIB_PATH. Check it here rather than
+    # discovering it on a phone we cannot read logcat from.
+    - name: Inspect the APK
       run: |
-        DEPLOY_BRANCH=srceng-old-port scripts/upload-to-github.sh bin/srceng-debug.apk version
-        CHANNEL_ID=801092155090927626 python3 scripts/send-to-discord.py "Commits history: https://github.com/nillerusr/srceng-android/commits/con-wrappers\nBuild: https://github.com/nillerusr/srceng-deploy/\nBuild finished at: $(date +%Y-%m-%d-%H:%M)"
+        set -uo pipefail
+        APK=bin/srceng-debug.apk
+        [ -f "$APK" ] || { echo "::error::ant produced no APK"; exit 1; }
+        echo "### APK" >>"$GITHUB_STEP_SUMMARY"
+        echo >>"$GITHUB_STEP_SUMMARY"
+        echo "\`$(basename "$APK")\`, $(wc -c <"$APK" | tr -d ' ') bytes" >>"$GITHUB_STEP_SUMMARY"
+        echo >>"$GITHUB_STEP_SUMMARY"
+        echo "| entry | size |" >>"$GITHUB_STEP_SUMMARY"
+        echo "| --- | --- |" >>"$GITHUB_STEP_SUMMARY"
+        unzip -l "$APK" \
+          | awk '/lib\// {printf "| %s | %s |\n", $4, $1}' \
+          | sed 's/| \([0-9]*\) |/| \1 bytes |/' >>"$GITHUB_STEP_SUMMARY" || true
+        echo >>"$GITHUB_STEP_SUMMARY"
+        echo "--- native libraries in the APK ---"
+        unzip -l "$APK" | grep -a 'lib/' || echo "(none)"
+        found=0
+        for m in libclient.so libserver.so liblauncher.so libGameUI.so; do
+          if unzip -l "$APK" | grep -aq "lib/arm64-v8a/${m}"; then
+            echo "ok      lib/arm64-v8a/${m}"
+            found=$((found + 1))
+          else
+            echo "::warning::${m} is not in lib/arm64-v8a/ - the engine will not find it"
+          fi
+        done
+        echo "modules_present=${found}" >>"$GITHUB_OUTPUT"
+        echo "modules present: ${found}/4"
 
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: srceng-l4d1-debug-apk
+        path: bin/srceng-debug.apk
+        if-no-files-found: error
+        retention-days: 30
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: carrier-build-log
+        path: build.log
+        if-no-files-found: warn
+        retention-days: 14
