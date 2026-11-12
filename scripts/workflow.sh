@@ -43,7 +43,12 @@ else
 	# Degrade to an APK with no engine libraries rather than failing the whole
 	# build: a green run that produces an installable shell is still worth
 	# having, and the fetch script annotates whatever went wrong.
-	scripts/fetch-engine-libs.sh || warn "continuing without engine libraries"
+	if scripts/fetch-engine-libs.sh; then
+		info "engine libraries staged"
+	else
+		code=$?
+		warn "fetch-engine-libs.sh exited ${code}; continuing without engine libraries"
+	fi
 fi
 
 generate_resources

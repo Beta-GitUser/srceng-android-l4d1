@@ -26,6 +26,19 @@
 
 set -uo pipefail
 
+# This runs in a runner whose logs are not reachable from anywhere this
+# project can read, and a silent non-zero exit costs a whole CI cycle to
+# locate. Report the line that failed.
+set -E
+trap 'ec=$?
+	if [ "$ec" -ne 0 ]; then
+		echo "::error::fetch-engine-libs.sh: line ${LINENO} exited ${ec}"
+	fi' ERR
+
+# PLATFORM_LIBS must be defined before the dependency walk below uses it:
+# under `set -u` an unset variable there is a fatal error, not a miss.
+. "$(cd "$(dirname "$0")" && pwd)/platform-libs.sh"
+
 ENGINE_REPO="${ENGINE_REPO:-Beta-GitUser/source-engine-l4d1}"
 ENGINE_BRANCH="${ENGINE_BRANCH:-arena/410ac3e6-source-engine-l4d1}"
 ENGINE_WORKFLOW_FILE="${ENGINE_WORKFLOW_FILE:-android.yml}"
